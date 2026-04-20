@@ -808,9 +808,7 @@ async function adminPlaceOrder() {
   const delivery   = document.getElementById('adm-delivery').value.trim();
   const item       = document.getElementById('adm-item').value.trim();
   if (!clientName) { showToast('Informe o nome do cliente'); return; }
-  if (!pickup)     { showToast('Informe o endereço de coleta'); return; }
   if (!bairro)     { showToast('Selecione o bairro de entrega'); return; }
-  if (!delivery)   { showToast('Informe o endereço de entrega'); return; }
   if (!item)       { showToast('Descreva o que será coletado'); return; }
   const prices = BAIRRO_PRECO[bairro];
   if (!prices) { showToast('Bairro inválido'); return; }
@@ -849,6 +847,22 @@ async function adminPlaceOrder() {
 
 // ===== INIT =====
 async function init() {
+  // Detecta ?role=courier ou ?role=client na URL
+  const urlRole = new URLSearchParams(window.location.search).get('role');
+  if (urlRole === 'courier' || urlRole === 'client') {
+    regRole = urlRole;
+    // Pre-seleciona o papel e vai direto para login
+    switchAuthTab('login');
+    // Mostra badge do papel na tela de auth
+    const heroP = document.querySelector('.auth-hero p');
+    if (heroP) {
+      const label = urlRole === 'courier' ? '🛵 Acesso exclusivo para entregadores' : '🛍️ Acesso exclusivo para clientes';
+      heroP.innerHTML = label;
+    }
+    // Esconde a aba "Criar conta" se vier como entregador (admin cadastra)
+    // Mantém visível para cliente se cadastrar sozinho
+  }
+
   const { data } = await db.auth.getSession();
   if (data.session) {
     session = data.session;
@@ -881,6 +895,11 @@ function switchAuthTab(tab) {
   document.querySelectorAll('.atab').forEach((el,i) => {
     el.classList.toggle('active', (i===0&&tab==='login')||(i===1&&tab==='register'));
   });
+  // se vier com ?role= na URL, pré-seleciona o papel ao abrir cadastro
+  if (tab === 'register') {
+    const urlRole = new URLSearchParams(window.location.search).get('role');
+    if (urlRole === 'courier' || urlRole === 'client') selectRole(urlRole);
+  }
 }
 function selectRole(role) {
   regRole = role;
@@ -935,6 +954,14 @@ async function doRegister() {
 
   btn.textContent = 'Verificando...'; btn.disabled = true;
 
+  // Captura código de indicação da URL
+  const refCode = new URLSearchParams(window.location.search).get('ref');
+  let referredById = null;
+  if (refCode && regRole === 'courier') {
+    const { data: referrer } = await db.from('users').select('id,can_refer').eq('referral_code', refCode).maybeSingle();
+    if (referrer && referrer.can_refer) referredById = referrer.id;
+  }
+
   // Verifica se o e-mail já tem um perfil cadastrado (qualquer papel)
   const { data: existing } = await db.from('users').select('role').eq('email', email).maybeSingle();
   if (existing) {
@@ -949,6 +976,7 @@ async function doRegister() {
   if (authErr) { err.textContent = authErr.message.includes('already') ? 'E-mail já cadastrado no sistema.' : authErr.message; btn.textContent = 'Criar conta'; btn.disabled = false; return; }
   const payload = { auth_id: authData.user.id, name, email, role: regRole };
   if (regRole === 'courier') { payload.vehicle = document.getElementById('rg-vehicle').value; payload.plate = document.getElementById('rg-plate').value.trim(); }
+  if (referredById) payload.referred_by = referredById;
   const { error: dbErr } = await db.from('users').insert(payload);
   btn.textContent = 'Criar conta'; btn.disabled = false;
   if (dbErr) { err.textContent = 'Erro ao salvar perfil. Verifique se o SQL foi executado.'; console.error(dbErr); return; }
@@ -1076,9 +1104,7 @@ async function placeOrder() {
   const bairro   = document.getElementById('p-neighborhood').value;
   const delivery = document.getElementById('p-delivery').value.trim();
   const item     = document.getElementById('p-item').value.trim();
-  if (!pickup)   { showToast('Informe o endereço de coleta'); return; }
   if (!bairro)   { showToast('Selecione o bairro de entrega'); return; }
-  if (!delivery) { showToast('Informe o endereço de entrega'); return; }
   if (!item)     { showToast('Descreva o que será coletado'); return; }
   const prices = getSelectedPrices();
   if (!prices)   { showToast('Bairro inválido'); return; }
@@ -1199,8 +1225,12 @@ async function accept(id) {
 }
 async function advance(id, next) {
   await db.from('orders').update({status:next,updated_at:new Date().toISOString()}).eq('id',id);
-  if (next==='done') showToast('Entrega concluída! 🎉');
-  else showToast('Status atualizado ✓');
+  if (next==='done') {
+    showToast('Entrega concluída! 🎉');
+    // processa bônus de indicação
+    const { data: order } = await db.from('orders').select('*').eq('id',id).single();
+    if (order) await processReferralBonuses(order);
+  } else showToast('Status atualizado ✓');
   loadCourierDash();
 }
 async function toggleOnline() {
@@ -1345,11 +1375,39 @@ async function openAdminFin() {
   showScreen('screen-admin-fin');
   document.getElementById('fin-title').textContent = 'Financeiro';
   document.getElementById('fin-badge').textContent = 'Admin';
-  await renderAdminFin();
+
+  // tabs dentro da tela financeira
+  const scroll = document.getElementById('fin-scroll');
+  scroll.innerHTML = `
+    <div style="display:flex;border-bottom:1px solid var(--border);margin-bottom:0;">
+      <div id="ftab-fin" style="padding:10px 16px;font-size:13px;font-weight:600;cursor:pointer;color:var(--blue);border-bottom:2px solid var(--blue);" onclick="switchFinTab('fin')">Pagamentos</div>
+      <div id="ftab-ref" style="padding:10px 16px;font-size:13px;cursor:pointer;color:var(--text2);border-bottom:2px solid transparent;" onclick="switchFinTab('ref')">Indicações</div>
+    </div>
+    <div id="fin-content"></div>`;
+
+  await switchFinTab('fin');
 }
 
-async function renderAdminFin() {
-  const el = document.getElementById('fin-scroll');
+async function switchFinTab(tab) {
+  ['fin','ref'].forEach(t => {
+    const el = document.getElementById('ftab-'+t);
+    if (!el) return;
+    el.style.color = t===tab ? 'var(--blue)' : 'var(--text2)';
+    el.style.borderBottomColor = t===tab ? 'var(--blue)' : 'transparent';
+    el.style.fontWeight = t===tab ? '600' : '400';
+  });
+  const content = document.getElementById('fin-content');
+  if (!content) return;
+  content.innerHTML = '<div class="loading"><span class="spin"></span>Carregando...</div>';
+  if (tab === 'fin') {
+    // render payments inline
+    await renderAdminFinContent(content);
+  } else {
+    content.innerHTML = await renderAdminReferrals();
+  }
+}
+
+async function renderAdminFinContent(el) {
   el.innerHTML = '<div class="loading"><span class="spin"></span>Carregando...</div>';
 
   // semana atual e passada
@@ -1502,27 +1560,27 @@ async function generateCharge(clientName, amount, weekStart, weekEnd) {
   });
   if (error) { showToast('Erro ao gerar cobrança'); return; }
   showToast(`Cobrança de ${fmtMoney(amount)} gerada para ${clientName}`);
-  renderAdminFin();
+  switchFinTab('fin');
 }
 
 async function markPaid(type, paymentId) {
   const { error } = await db.from('payments').update({ status:'paid', paid_at: new Date().toISOString() }).eq('id', paymentId);
   if (error) { showToast('Erro ao registrar pagamento'); return; }
   showToast('Pagamento registrado ✓');
-  renderAdminFin();
+  switchFinTab('fin');
 }
 
 async function generatePayout(courierId, courierName, amount, weekStart, weekEnd) {
   // check se já existe
   const { data: existing } = await db.from('payments').select('id').eq('type','courier_payout').eq('reference_id',courierId).eq('week_start',weekStart).maybeSingle();
-  if (existing) { showToast('Repasse já gerado para este entregador'); renderAdminFin(); return; }
+  if (existing) { showToast('Repasse já gerado para este entregador'); switchFinTab('fin'); return; }
   const { error } = await db.from('payments').insert({
     type: 'courier_payout', reference_id: courierId, reference_name: courierName,
     week_start: weekStart, week_end: weekEnd, amount, status: 'pending'
   });
   if (error) { showToast('Erro ao gerar repasse'); return; }
   showToast(`Repasse de ${fmtMoney(amount)} preparado para ${courierName}`);
-  renderAdminFin();
+  switchFinTab('fin');
 }
 
 async function confirmPayout(paymentId, courierName, amount) {
@@ -1531,7 +1589,7 @@ async function confirmPayout(paymentId, courierName, amount) {
   if (error) { showToast('Erro ao confirmar repasse'); return; }
   // notify courier via a flag they can see
   showToast(`Pix confirmado para ${courierName} ✓`);
-  renderAdminFin();
+  switchFinTab('fin');
 }
 
 function showClientOrders(name, orders) {
@@ -1542,6 +1600,9 @@ function showClientOrders(name, orders) {
 async function openCourierFin() {
   showScreen('screen-courier-fin');
   await renderCourierFin();
+  // adiciona seção de indicações abaixo
+  const el = document.getElementById('courier-fin-scroll');
+  await renderCourierReferrals(el);
 }
 
 async function renderCourierFin() {
@@ -1661,6 +1722,226 @@ function checkNewOrders(orders) {
   if (lastOrderCount === null) { lastOrderCount = orders.length; return; }
   if (orders.length > lastOrderCount) playAlert();
   lastOrderCount = orders.length;
+}
+
+
+// ===== MULTINÍVEL DE INDICAÇÃO =====
+const REFERRAL_L1 = 0.70; // A indica B → A ganha por entrega de B
+const REFERRAL_L2 = 0.30; // B indica C → A ganha por entrega de C
+
+// Gera código único de indicação
+function genReferralCode(name) {
+  const base = name.toUpperCase().replace(/[^A-Z]/g,'').slice(0,4);
+  const rand = Math.random().toString(36).slice(2,6).toUpperCase();
+  return base + rand;
+}
+
+// Processa bônus de indicação quando uma entrega é concluída
+async function processReferralBonuses(order) {
+  if (!order.courier_id) return;
+  const week = getWeekBounds(0);
+  const wStart = week.start.toISOString().slice(0,10);
+  const wEnd   = week.end.toISOString().slice(0,10);
+
+  // busca o entregador que fez a entrega
+  const { data: courier } = await db.from('users').select('id,name,referred_by').eq('id', order.courier_id).single();
+  if (!courier) return;
+
+  // Nível 1: quem indicou o entregador atual
+  if (courier.referred_by) {
+    const { data: l1 } = await db.from('users').select('id,name,can_refer,referred_by').eq('id', courier.referred_by).single();
+    if (l1 && l1.can_refer) {
+      await db.from('referral_bonuses').insert({
+        earner_id: l1.id, earner_name: l1.name,
+        source_courier_id: courier.id, source_courier_name: courier.name,
+        order_id: order.id, level: 1, amount: REFERRAL_L1,
+        week_start: wStart, week_end: wEnd
+      });
+
+      // Nível 2: quem indicou o indicador
+      if (l1.referred_by) {
+        const { data: l2 } = await db.from('users').select('id,name,can_refer').eq('id', l1.referred_by).single();
+        if (l2 && l2.can_refer) {
+          await db.from('referral_bonuses').insert({
+            earner_id: l2.id, earner_name: l2.name,
+            source_courier_id: courier.id, source_courier_name: courier.name,
+            order_id: order.id, level: 2, amount: REFERRAL_L2,
+            week_start: wStart, week_end: wEnd
+          });
+        }
+      }
+    }
+  }
+}
+
+// ===== ADMIN: GERENCIAR INDICAÇÕES =====
+async function renderAdminReferrals() {
+  const { data: couriers } = await db.from('users').select('*').eq('role','courier').order('name');
+  const { data: bonuses }  = await db.from('referral_bonuses').select('*').order('created_at',{ascending:false}).limit(100);
+  const couriersArr = couriers || [];
+  const bonusesArr  = bonuses  || [];
+
+  // KPIs
+  const totalBonuses = bonusesArr.reduce((a,b)=>a+(+b.amount),0);
+  const unpaidBonuses = bonusesArr.filter(b=>!b.paid).reduce((a,b)=>a+(+b.amount),0);
+  const activeReferrers = couriersArr.filter(c=>c.can_refer).length;
+
+  return `
+  <div style="padding:14px 14px 0;">
+    <div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px;">Resumo de indicações</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:16px;">
+      <div class="mcard"><div class="mval">${activeReferrers}</div><div class="mlbl">indicadores ativos</div></div>
+      <div class="mcard"><div class="mval" style="color:var(--amber);">${fmtMoney(unpaidBonuses)}</div><div class="mlbl">bônus a pagar</div></div>
+      <div class="mcard"><div class="mval">${fmtMoney(totalBonuses)}</div><div class="mlbl">total histórico</div></div>
+    </div>
+
+    <div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px;">Entregadores — permissão de indicar</div>
+    ${couriersArr.map(c => {
+      const myBonuses = bonusesArr.filter(b=>b.earner_id===c.id);
+      const myUnpaid  = myBonuses.filter(b=>!b.paid).reduce((a,b)=>a+(+b.amount),0);
+      const myNetwork = couriersArr.filter(x=>x.referred_by===c.id).length;
+      return `<div class="ocard" style="margin:0 0 8px;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;">
+          <div>
+            <div style="font-size:13px;font-weight:600;">🛵 ${c.name}</div>
+            <div style="font-size:11px;color:var(--text2);">Rede: ${myNetwork} indicado${myNetwork!==1?'s':''} · Bônus pendente: ${fmtMoney(myUnpaid)}</div>
+            ${c.referral_code ? `<div style="font-size:11px;color:var(--blue);margin-top:2px;">Código: <strong>${c.referral_code}</strong></div>` : ''}
+          </div>
+          <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
+            <span class="sbadge ${c.can_refer?'sdone':'scanc'}">${c.can_refer?'✓ Pode indicar':'Bloqueado'}</span>
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          ${!c.can_refer
+            ? `<button class="btn-sm accept" onclick="toggleReferral('${c.id}',true,'${c.name.replace(/'/g,"\'")}')">Liberar para indicar</button>`
+            : `<button class="btn-sm danger" onclick="toggleReferral('${c.id}',false,'${c.name.replace(/'/g,"\'")}')">Revogar permissão</button>`
+          }
+          ${myUnpaid > 0 ? `<button class="btn-sm progress" onclick="payReferralBonuses('${c.id}','${c.name.replace(/'/g,"\'")}',${myUnpaid})">Pagar bônus ${fmtMoney(myUnpaid)}</button>` : ''}
+        </div>
+      </div>`;
+    }).join('')}
+
+    <div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin:14px 0 10px;">Últimos bônus gerados</div>
+    ${bonusesArr.slice(0,20).map(b=>`
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid var(--border);">
+        <div>
+          <div style="font-size:12px;font-weight:600;">${b.earner_name} <span style="color:var(--text2);font-weight:400;">← nível ${b.level} de</span> ${b.source_courier_name}</div>
+          <div style="font-size:11px;color:var(--text2);">${fmtDate(b.created_at)} · ${b.paid?'✓ Pago':'Pendente'}</div>
+        </div>
+        <div style="font-size:13px;font-weight:700;color:var(--green);">${fmtMoney(b.amount)}</div>
+      </div>`).join('')}
+  </div>`;
+}
+
+async function toggleReferral(courierId, enable, courierName) {
+  let code = null;
+  if (enable) {
+    // busca dados do entregador para gerar código
+    const { data: c } = await db.from('users').select('name,referral_code').eq('id',courierId).single();
+    code = c?.referral_code || genReferralCode(courierName);
+  }
+  const update = { can_refer: enable };
+  if (enable && code) update.referral_code = code;
+  await db.from('users').update(update).eq('id', courierId);
+  showToast(enable ? `${courierName} pode indicar agora ✓` : `Permissão revogada`);
+  // re-render
+  const el = document.getElementById('fin-scroll');
+  el.innerHTML = await renderAdminReferrals();
+}
+
+async function payReferralBonuses(courierId, courierName, amount) {
+  if (!confirm(`Confirmar pagamento de bônus de ${fmtMoney(amount)} para ${courierName}?`)) return;
+  const week = getWeekBounds(-1);
+  await db.from('referral_bonuses').update({ paid: true, paid_at: new Date().toISOString() })
+    .eq('earner_id', courierId).eq('paid', false);
+  showToast(`Bônus de ${fmtMoney(amount)} pago para ${courierName} ✓`);
+  const el = document.getElementById('fin-scroll');
+  el.innerHTML = await renderAdminReferrals();
+}
+
+// ===== COURIER: VER INDICAÇÕES =====
+async function renderCourierReferrals(el) {
+  if (!profile) return;
+  const { data: me } = await db.from('users').select('can_refer,referral_code,referred_by').eq('id',profile.id).single();
+  if (!me) return;
+
+  if (!me.can_refer) {
+    el.innerHTML += `
+    <div style="padding:0 14px 14px;">
+      <div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;">Programa de indicação</div>
+      <div class="notice ni">Você ainda não tem permissão para indicar entregadores. Fale com o administrador.</div>
+    </div>`;
+    return;
+  }
+
+  const appUrl = window.location.origin + window.location.pathname;
+  const referralLink = appUrl + '?role=courier&ref=' + me.referral_code;
+
+  const { data: network } = await db.from('users').select('id,name,created_at').eq('referred_by',profile.id).eq('role','courier');
+  const { data: bonuses }  = await db.from('referral_bonuses').select('*').eq('earner_id',profile.id).order('created_at',{ascending:false}).limit(50);
+  const networkArr = network || [];
+  const bonusesArr = bonuses || [];
+  const unpaid = bonusesArr.filter(b=>!b.paid).reduce((a,b)=>a+(+b.amount),0);
+  const totalEarned = bonusesArr.reduce((a,b)=>a+(+b.amount),0);
+
+  el.innerHTML += `
+  <div style="padding:0 14px 14px;">
+    <div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px;">Seu programa de indicação</div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px;">
+      <div class="mcard"><div class="mval">${networkArr.length}</div><div class="mlbl">indicados</div></div>
+      <div class="mcard"><div class="mval" style="color:var(--green);">${fmtMoney(totalEarned)}</div><div class="mlbl">total ganho</div></div>
+      <div class="mcard" style="grid-column:span 2;"><div class="mval" style="color:var(--amber);">${fmtMoney(unpaid)}</div><div class="mlbl">bônus a receber esta semana</div></div>
+    </div>
+
+    <div style="background:var(--bg2);border-radius:var(--r);padding:14px;margin-bottom:14px;">
+      <div style="font-size:12px;font-weight:600;margin-bottom:6px;">Seu link de indicação</div>
+      <div style="font-size:11px;color:var(--blue);word-break:break-all;margin-bottom:10px;">${referralLink}</div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn-sm accept" onclick="copyReferral('${referralLink}')">Copiar link</button>
+        <button class="btn-sm" onclick="shareReferral('${referralLink}')">Compartilhar</button>
+      </div>
+      <div style="font-size:11px;color:var(--text2);margin-top:8px;line-height:1.6;">
+        Ganhe <strong>R$ 0,70</strong> por entrega de quem você indicar (nível 1)<br>
+        Ganhe <strong>R$ 0,30</strong> por entrega de quem seu indicado indicar (nível 2)
+      </div>
+    </div>
+
+    ${networkArr.length ? `
+    <div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;">Sua rede</div>
+    ${networkArr.map(c=>`
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);">
+        <div><div style="font-size:13px;font-weight:600;">🛵 ${c.name}</div>
+        <div style="font-size:11px;color:var(--text2);">Desde ${fmtDate(c.created_at)}</div></div>
+        <span class="sbadge sc">Nível 1</span>
+      </div>`).join('')}` : ''}
+
+    ${bonusesArr.length ? `
+    <div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin:14px 0 8px;">Histórico de bônus</div>
+    ${bonusesArr.slice(0,15).map(b=>`
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);">
+        <div><div style="font-size:12px;font-weight:600;">Entrega de ${b.source_courier_name}</div>
+        <div style="font-size:11px;color:var(--text2);">Nível ${b.level} · ${fmtDate(b.created_at)} · ${b.paid?'✓ Pago':'Pendente'}</div></div>
+        <div style="font-size:13px;font-weight:700;color:var(--green);">${fmtMoney(b.amount)}</div>
+      </div>`).join('')}` : ''}
+  </div>`;
+}
+
+function copyReferral(link) {
+  navigator.clipboard.writeText(link).then(()=>showToast('Link copiado! ✓')).catch(()=>{
+    // fallback
+    const inp = document.createElement('input');
+    inp.value = link; document.body.appendChild(inp);
+    inp.select(); document.execCommand('copy');
+    document.body.removeChild(inp);
+    showToast('Link copiado! ✓');
+  });
+}
+
+function shareReferral(link) {
+  if (navigator.share) {
+    navigator.share({ title:'Entregou — seja entregador!', text:'Use meu link para se cadastrar como entregador:', url: link });
+  } else { copyReferral(link); }
 }
 
 // ===== UTILS =====
