@@ -10963,14 +10963,16 @@ function AdminFin({
   const [loading, setLoading] = useState(true);
   const [selWeek, setSelWeek] = useState(0); // 0=atual, -1=anterior
   const _nowAF = new Date();
-  const [histMonthA, setHistMonthA] = useState(_nowAF.getMonth() + 1);
-  const [histYearA, setHistYearA] = useState(_nowAF.getFullYear());
+  const _todayAF = _nowAF.getFullYear() + '-' + String(_nowAF.getMonth()+1).padStart(2,'0') + '-' + String(_nowAF.getDate()).padStart(2,'0');
+  const _weekAgoAF = (() => { const d = new Date(_nowAF); d.setDate(d.getDate()-6); return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); })();
+  const [histFromA, setHistFromA] = useState(_weekAgoAF);
+  const [histToA, setHistToA] = useState(_todayAF);
   const [histClosings, setHistClosings] = useState([]);
   const [histLoadingA, setHistLoadingA] = useState(false);
-  const loadHistA = async (month, year) => {
+  const [histClientFilter, setHistClientFilter] = useState('');
+  const loadHistA = async (from, to) => {
+    if (!from || !to) return;
     setHistLoadingA(true);
-    const from = year + '-' + String(month).padStart(2,'0') + '-01';
-    const to = year + '-' + String(month).padStart(2,'0') + '-' + String(new Date(year, month, 0).getDate()).padStart(2,'0');
     const { data } = await db.from('daily_closings').select('*').gte('date', from).lte('date', to).order('date',{ascending:false});
     setHistClosings(data||[]);
     setHistLoadingA(false);
@@ -11524,17 +11526,36 @@ function AdminFin({
     }, "Pagar b\xF4nus ", fmtMoney(mu))));
   })), tab === 'historico' && /*#__PURE__*/React.createElement("div", {
     style: { padding: '12px 14px 0' }
-  }, /*#__PURE__*/React.createElement("div", { style: { display: 'flex', gap: 8, marginBottom: 14 } },
-    /*#__PURE__*/React.createElement("select", { value: histMonthA, onChange: e => setHistMonthA(+e.target.value), style: { flex: 1, fontSize: 13, padding: '6px 8px', borderRadius: 'var(--rs)', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' } },
-      ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'].map((m,i) => /*#__PURE__*/React.createElement("option", { key: i+1, value: i+1 }, m))),
-    /*#__PURE__*/React.createElement("select", { value: histYearA, onChange: e => setHistYearA(+e.target.value), style: { flex: 1, fontSize: 13, padding: '6px 8px', borderRadius: 'var(--rs)', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' } },
-      Array.from({ length: 3 }, (_, i) => new Date().getFullYear() - i).map(y => /*#__PURE__*/React.createElement("option", { key: y, value: y }, y))),
-    /*#__PURE__*/React.createElement("button", { className: "btn-sm accept", onClick: () => loadHistA(histMonthA, histYearA) }, "Buscar")
+  }, /*#__PURE__*/React.createElement("div", { style: { display: 'flex', gap: 8, marginBottom: 14, alignItems: 'center' } },
+    /*#__PURE__*/React.createElement("div", { style: { flex: 1 } },
+      /*#__PURE__*/React.createElement("div", { style: { fontSize: 11, color: 'var(--text2)', marginBottom: 4 } }, "De"),
+      /*#__PURE__*/React.createElement("input", { type: "date", value: histFromA, onChange: e => setHistFromA(e.target.value),
+        style: { width: '100%', fontSize: 13, padding: '6px 8px', borderRadius: 'var(--rs)', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' } })
+    ),
+    /*#__PURE__*/React.createElement("div", { style: { flex: 1 } },
+      /*#__PURE__*/React.createElement("div", { style: { fontSize: 11, color: 'var(--text2)', marginBottom: 4 } }, "At\xE9"),
+      /*#__PURE__*/React.createElement("input", { type: "date", value: histToA, onChange: e => setHistToA(e.target.value),
+        style: { width: '100%', fontSize: 13, padding: '6px 8px', borderRadius: 'var(--rs)', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' } })
+    ),
+    /*#__PURE__*/React.createElement("button", { className: "btn-sm accept", style: { alignSelf: 'flex-end', whiteSpace: 'nowrap' }, onClick: () => loadHistA(histFromA, histToA) }, "Buscar")
+  ), histClosings.length > 0 && /*#__PURE__*/React.createElement("div", { style: { marginBottom: 14 } },
+    /*#__PURE__*/React.createElement("select", {
+      value: histClientFilter,
+      onChange: e => setHistClientFilter(e.target.value),
+      style: { width: '100%', fontSize: 13, padding: '6px 8px', borderRadius: 'var(--rs)', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }
+    },
+      /*#__PURE__*/React.createElement("option", { value: '' }, "Todos os clientes"),
+      [...new Set(histClosings.map(cl => cl.client_id))].map(cid => {
+        const cl = histClosings.find(x => x.client_id === cid);
+        return /*#__PURE__*/React.createElement("option", { key: cid, value: cid }, cl.client_name || cid);
+      })
+    )
   ), histLoadingA ? /*#__PURE__*/React.createElement(Loading, null) : histClosings.length === 0 ? /*#__PURE__*/React.createElement("div", { className: "notice ni" }, "Clique em Buscar para carregar.") : (() => {
+    const filteredClosings = histClientFilter ? histClosings.filter(cl => cl.client_id === histClientFilter) : histClosings;
     const statusL = { matched: '\u2705 Confirmado', agreed: '\u2705 Acordado', pending: '\u23F3 Aguard. cliente', pending_l0: '\uD83D\uDC40 Aguard. aprova\xE7\xE3o', rejected_l0: '\u274C Devolvido', diverged: '\u26A0\uFE0F Diverg\xEAncia' };
     const statusC2 = { matched: 'var(--green)', agreed: 'var(--green)', pending: 'var(--amber)', pending_l0: 'var(--purple)', rejected_l0: 'var(--red)', diverged: 'var(--red)' };
     const wks = {};
-    histClosings.forEach(cl => { const wb=getWeekBoundsFromDate(cl.date); if (!wks[wb.startStr]) wks[wb.startStr]={startStr:wb.startStr,endStr:wb.endStr,closings:[]}; wks[wb.startStr].closings.push(cl); });
+    filteredClosings.forEach(cl => { const wb=getWeekBoundsFromDate(cl.date); if (!wks[wb.startStr]) wks[wb.startStr]={startStr:wb.startStr,endStr:wb.endStr,closings:[]}; wks[wb.startStr].closings.push(cl); });
     return Object.values(wks).sort((a,b)=>b.startStr.localeCompare(a.startStr)).map(wk => {
       const total = wk.closings.reduce((a,cl)=>a+(cl.courier_submission||[]).reduce((b,s)=>b+s.qty,0),0);
       const confQty = wk.closings.filter(cl=>cl.status==='matched'||cl.status==='agreed').reduce((a,cl)=>a+(cl.courier_submission||[]).reduce((b,s)=>b+s.qty,0),0);
